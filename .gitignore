@@ -1,0 +1,30 @@
+# ===== Môi trường ảo =====
+neu_det_env/
+venv/
+.venv/
+env/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===== Dữ liệu sinh ra khi chạy (tái tạo được từ datasets/) =====
+cache/*.npz
+checkpoints/*.npz
+outputs/
+*.log
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

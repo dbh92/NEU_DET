@@ -1,0 +1,8 @@
+# Chuẩn hóa xuống dòng: trong repo luôn là LF
+* text=auto eol=lf
+
+# Ảnh là nhị phân, không đụng vào
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.npz binary
