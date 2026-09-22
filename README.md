@@ -38,7 +38,13 @@ neu_det/
 │   ├── train/{images,annotations}
 │   └── validation/{images,annotations}
 ├── src/                    # mã nguồn
-│   └── data_loader.py      # đọc JPEG -> numpy, cache .npz
+│   ├── data_loader.py      # đọc JPEG -> numpy, cache .npz
+│   ├── preprocess.py       # chuẩn hóa, one-hot, mini-batch, show_samples
+│   ├── layers.py           # Layer, Dense
+│   ├── activations.py      # ReLU, LeakyReLU, softmax
+│   └── losses.py           # cross-entropy (bước 5)
+├── CLAUDE.md               # ngữ cảnh + tiến độ cho Claude Code
+├── requirements.txt
 ├── cache/                  # file .npz sinh ra khi chạy (git bỏ qua)
 └── neu_det_env/            # môi trường ảo (git bỏ qua)
 ```
@@ -50,23 +56,28 @@ Python 3.10.11
 | Thư viện | Vai trò |
 |----------|---------|
 | `numpy`      | **toàn bộ** phép toán của mạng nơ-ron |
-| `Pillow`     | chỉ để giải nén file JPEG thành mảng số |
+| `opencv-python` | chỉ dùng `cv2.imread` để giải nén JPEG thành mảng số |
 | `matplotlib` | chỉ để vẽ biểu đồ |
 | `tqdm`       | thanh tiến trình |
 
-Chạy:
+Cài đặt trên máy mới:
 
 ```powershell
+python -m venv neu_det_env
 .\neu_det_env\Scripts\Activate.ps1
+pip install -r requirements.txt
 python src\data_loader.py
 ```
 
+Tiếp tục học với Claude Code: mở thư mục trong VS Code. Claude Code tự đọc
+[CLAUDE.md](CLAUDE.md) (tiến độ, quy ước, bước đang làm) nên có thể tiếp tục ngay.
+
 ## Lộ trình
 
-- [ ] **1.** Data loader: JPEG → numpy array, resize, cache
-- [ ] **2.** Tiền xử lý: normalize, one-hot, shuffle
-- [ ] **3.** Lớp `Dense` — forward
-- [ ] **4.** Activation: ReLU, Softmax
+- [x] **1.** Data loader: JPEG → numpy array, resize, cache
+- [x] **2.** Tiền xử lý: normalize, one-hot, shuffle
+- [x] **3.** Lớp `Dense` — forward
+- [x] **4.** Activation: ReLU, Softmax
 - [ ] **5.** Loss: Cross-Entropy
 - [ ] **6.** Backpropagation
 - [ ] **7.** Optimizer: SGD → Momentum → Adam
