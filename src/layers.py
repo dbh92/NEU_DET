@@ -51,7 +51,11 @@ class Dense(Layer):
         out_features: int,
         init: str = "he",
         rng: np.random.Generator | None = None,
+        dtype=np.float32,
     ):
+        # dtype: mặc định float32 cho nhanh và nhẹ. Khi kiểm tra gradient bằng
+        # sai phân số (gradcheck) thì truyền np.float64, vì float32 chỉ có ~7
+        # chữ số nên phép trừ hai loss gần bằng nhau sẽ mất hết độ chính xác.
         if rng is None:
             rng = np.random.default_rng()
 
@@ -65,9 +69,9 @@ class Dense(Layer):
         else:
             raise ValueError(f"Phương pháp khởi tạo '{init}' không được hỗ trợ.")
 
-        # 2. Trọng số và bias — CÙNG kiểu float32
-        self.W = (rng.standard_normal((in_features, out_features)) * std).astype(np.float32)
-        self.b = np.zeros(out_features, dtype=np.float32)
+        # 2. Trọng số và bias — CÙNG kiểu dtype
+        self.W = (rng.standard_normal((in_features, out_features)) * std).astype(dtype)
+        self.b = np.zeros(out_features, dtype=dtype)
 
         # 3. Gradient — cùng shape, cùng dtype với tham số
         self.dW = np.zeros_like(self.W)
@@ -89,12 +93,38 @@ class Dense(Layer):
         return X @ self.W + self.b
 
     def backward(self, dout: np.ndarray) -> np.ndarray:
-        # Sẽ viết ở bước backward.
-        # LƯU Ý khi viết: ghi TẠI CHỖ để params()/grads() không bị mất tham chiếu:
-        #     self.dW[...] = ...      (đúng)
-        #     self.dW = ...           (sai — tạo mảng mới)
-        # Và vì b là mảng 1 chiều (out,), db phải là .sum(axis=0) KHÔNG keepdims.
-        raise NotImplementedError("Bước backward")
+        """
+        Lan truyền ngược qua Z = X @ W + b.
+
+        Parameters:
+            dout: dL/dZ, shape (batch, out) — cùng shape với đầu ra của forward.
+
+        Returns:
+            dX = dL/dX, shape (batch, in) — cùng shape với đầu vào.
+
+        Đồng thời ghi self.dW (in, out) và self.db (out,).
+
+        Cách nhớ công thức bằng shape:
+            dX  = dout @ W.T    (B, out) @ (out, in) -> (B, in)   ✔
+            dW  = X.T  @ dout   (in, B)  @ (B, out)  -> (in, out) ✔
+            db  = dout.sum(axis=0)                   -> (out,)    ✔
+
+        db là TỔNG chứ không phải trung bình: b được broadcast cộng vào cả B
+        hàng, tức tham gia vào loss B lần, nên gradient là tổng đóng góp của
+        tất cả các hàng. (Phép chia cho B đã nằm sẵn trong dZ của loss.)
+        """
+        if self.X is None:
+            raise RuntimeError("Phải gọi forward() trước khi gọi backward()")
+        if dout.shape != (self.X.shape[0], self.W.shape[1]):
+            raise ValueError(
+                f"dout mong đợi shape {(self.X.shape[0], self.W.shape[1])}, nhận {dout.shape}"
+            )
+
+        # Ghi TẠI CHỖ bằng [...] để optimizer không mất tham chiếu qua grads()
+        self.dW[...] = self.X.T @ dout          # (in, out)
+        self.db[...] = dout.sum(axis=0)         # (out,) — KHÔNG keepdims
+
+        return dout @ self.W.T                  # (batch, in)
 
     def params(self) -> dict[str, np.ndarray]:
         # Trả về tham chiếu (reference), không .copy(), để optimizer sửa tại chỗ
@@ -103,6 +133,7 @@ class Dense(Layer):
     def grads(self) -> dict[str, np.ndarray]:
         return {"W": self.dW, "b": self.db}
 
+    # Method này giúp dễ đọc object
     def __repr__(self) -> str:
         num_params = self.W.size + self.b.size
         return f"Dense({self.W.shape[0]} -> {self.W.shape[1]}, params={num_params:,})"

@@ -42,7 +42,8 @@ neu_det/
 │   ├── preprocess.py       # chuẩn hóa, one-hot, mini-batch, show_samples
 │   ├── layers.py           # Layer, Dense
 │   ├── activations.py      # ReLU, LeakyReLU, softmax
-│   └── losses.py           # cross-entropy (bước 5)
+│   ├── losses.py           # log_softmax, cross-entropy, accuracy
+│   └── gradcheck.py        # kiểm tra backprop bằng sai phân số
 ├── CLAUDE.md               # ngữ cảnh + tiến độ cho Claude Code
 ├── requirements.txt
 ├── cache/                  # file .npz sinh ra khi chạy (git bỏ qua)
@@ -78,10 +79,10 @@ Tiếp tục học với Claude Code: mở thư mục trong VS Code. Claude Code
 - [x] **2.** Tiền xử lý: normalize, one-hot, shuffle
 - [x] **3.** Lớp `Dense` — forward
 - [x] **4.** Activation: ReLU, Softmax
-- [ ] **5.** Loss: Cross-Entropy
-- [ ] **6.** Backpropagation
-- [ ] **7.** Optimizer: SGD → Momentum → Adam
-- [ ] **8.** Training loop + mini-batch
+- [x] **5.** Loss: Cross-Entropy
+- [x] **6.** Backpropagation
+- [x] **7.** Optimizer: SGD → Momentum → Adam
+- [x] **8.** Training loop + mini-batch
 - [ ] **9.** Đánh giá: accuracy, confusion matrix
 - [ ] **10.** Chống overfit: L2, Dropout, BatchNorm
 - [ ] **11.** CNN bằng NumPy (im2col)

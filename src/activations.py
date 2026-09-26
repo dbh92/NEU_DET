@@ -28,10 +28,30 @@ class ReLU(Layer):
         return np.maximum(0, X)
 
     def backward(self, dout: np.ndarray) -> np.ndarray:
-        raise NotImplementedError("Bước 6")
+        """
+        Lan truyền ngược qua ReLU.
+
+        Parameters:
+            dout: dL/d(đầu ra), cùng shape với X đã đưa vào forward.
+
+        Returns:
+            dX = dL/dX, cùng shape.
+
+        Đạo hàm của max(0, x) là 1 ở chỗ dương, 0 ở chỗ âm. Nói cách khác:
+        chỗ nào nơ-ron BẬT thì gradient đi qua nguyên vẹn, chỗ nào TẮT thì
+        gradient bị chặn lại hoàn toàn. Đó cũng là gốc rễ của hiện tượng
+        "dying ReLU": nơ-ron luôn âm thì gradient luôn 0, không bao giờ hồi phục.
+        """
+        if self.mask is None:
+            raise RuntimeError("Phải gọi forward() trước khi gọi backward()")
+        if dout.shape != self.mask.shape:
+            raise ValueError(f"dout mong đợi shape {self.mask.shape}, nhận {dout.shape}")
+
+        # mask là bool: True -> 1, False -> 0
+        return dout * self.mask
 
     def __repr__(self) -> str:
-        return "ReLU()"     
+        return "ReLU()"
 
 # Hàm 2 - softmax (hàm thường không phải Layer)
 def softmax(Z: np.ndarray) -> np.ndarray:
@@ -71,7 +91,16 @@ class LeakyReLU(Layer):
         return np.where(self.mask, X, self.alpha * X)
 
     def backward(self, dout: np.ndarray) -> np.ndarray:
-        raise NotImplementedError("Bước 6")
+        """
+        Đạo hàm là 1 ở phần dương, alpha ở phần âm — nên gradient không bao giờ
+        tắt hẳn, và nơ-ron "chết" vẫn còn đường hồi phục.
+        """
+        if self.mask is None:
+            raise RuntimeError("Phải gọi forward() trước khi gọi backward()")
+        if dout.shape != self.mask.shape:
+            raise ValueError(f"dout mong đợi shape {self.mask.shape}, nhận {dout.shape}")
+
+        return np.where(self.mask, dout, self.alpha * dout)
 
     def __repr__(self) -> str:
         return f"LeakyReLU(alpha={self.alpha})"

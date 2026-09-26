@@ -56,9 +56,13 @@ phải chọn chỉ số ngẫu nhiên (`rng.choice(N, 64, replace=False)`).
 |---|---|
 | `src/data_loader.py` | `CLASS_NAMES`, `IMG_SIZE=64`, `PROJECT_ROOT`, `DATA_ROOT`, `CACHE_PATH`; `resize_nearest(image, size)`, `load_image(path, size)`, `load_split(split_dir, size) -> (X uint8 (N,64,64), y int64)`, `build_cache()`, `load_cache() -> (X_train, y_train, X_val, y_val)` → `cache/neu_det_64.npz` |
 | `src/preprocess.py` | `flatten`, `fit_standardizer(X) -> (mean, std)` (scalar, chỉ fit trên train), `apply_standardizer`, `one_hot(y, C)`, `shuffle_data(X, y, rng)`, `iterate_minibatches(X, y, batch_size, shuffle, rng)` (generator), `prepare_data() -> dict` (X_train (1440,4096) f32, Y_train one-hot, y_train, X_val, Y_val, y_val, mean≈128.80, std≈53.13), `show_samples(...)` → `outputs/samples.png` |
-| `src/layers.py` | `Layer` (base: `forward(X, training)`, `backward(dout)`, `params()`, `grads()`), `Dense(in, out, init="he"\|"xavier", rng)` — `W (in,out)`, `b (out,)`, `dW`, `db`, cache `self.X`. `xavier` = Glorot `sqrt(2/(in+out))`. `backward` chưa viết. |
-| `src/activations.py` | `ReLU` (lưu `self.mask = X > 0`), `LeakyReLU(alpha)`, `softmax(Z)` (ổn định, trừ max). `backward` chưa viết. |
-| `src/losses.py` | **Rỗng** — Bước 5 |
+| `src/layers.py` | `Layer` (base: `forward(X, training)`, `backward(dout)`, `params()`, `grads()`), `Dense(in, out, init="he"\|"xavier", rng, dtype=np.float32)` — `W (in,out)`, `b (out,)`, `dW`, `db`, cache `self.X`. `xavier` = Glorot `sqrt(2/(in+out))`. `backward`: `dX = dout @ W.T`, `dW[...] = X.T @ dout`, `db[...] = dout.sum(0)` |
+| `src/activations.py` | `ReLU` (lưu `self.mask = X > 0`, `backward = dout * mask`), `LeakyReLU(alpha)`, `softmax(Z)` (ổn định, trừ max) |
+| `src/losses.py` | `log_softmax(Z)`, `cross_entropy(P, Y, eps)` (Cách A, bị chặn trần ở 27.63), `SoftmaxCrossEntropy` (`forward(Z, Y) -> float` nhận LOGITS, `backward() -> (P-Y)/B`), `accuracy(scores, y)`, `test_luong_tinh_loss()` |
+| `src/optimizers.py` | `Optimizer` (base: gom tham chiếu params/grads một lần trong `__init__`, `step()`, `zero_grad()`), `SGD(layers, lr)`, `Momentum(layers, lr, momentum=0.9)`, `Adam(layers, lr=1e-3, beta1, beta2, eps, bias_correction=True)`. Mọi cập nhật phải **ghi tại chỗ** (`p -= ...`). lr đề xuất cho mạng 4096→128→6: SGD 0.1, Momentum 0.01, Adam 1e-3 |
+| `src/model.py` | `Sequential(layers)` — `forward(X, training)` lặp xuôi, `backward(dout)` lặp **reversed**, `predict(X)`, `so_tham_so()`; `tao_mlp(in, hidden: list, C, rng)` (ẩn dùng "he", lớp cuối "xavier"; `hidden=[]` → tuyến tính). Loss nằm NGOÀI Sequential |
+| `src/train.py` | `danh_gia(model, crit, X, Y, y, batch_size)` → `(loss, acc)` (cộng dồn có trọng số, `training=False`), `train(model, opt, crit, data, epochs, batch_size, rng, verbose)` → `history` (4 list + `no_o_epoch` khi loss thành nan), `ve_duong_cong(history, save_path)` → `outputs/training_curve.png`, `so_sanh(data, cac_cau_hinh, ...)` |
+| `src/gradcheck.py` | `numerical_gradient(f, x, h=1e-4)` (sai phân trung tâm; h nhỏ hơn lại TỆ hơn do làm tròn), `rel_error`, `check_gradients(seed, nguong=1e-6)` (mạng 5→4→3 float64), `overfit_batch_nho()` |
 
 ## Tiến độ
 
@@ -66,11 +70,11 @@ phải chọn chỉ số ngẫu nhiên (`rng.choice(N, 64, replace=False)`).
 - [x] **2.** Tiền xử lý + `show_samples`
 - [x] **3.** `Layer`, `Dense` forward (thí nghiệm He init: std=1 → 4e10, std=0.01 → 3e-10, He → 0.87)
 - [x] **4.** `ReLU`, `LeakyReLU`, `softmax` (forward pass đầu tiên: acc ≈ 1/6, ReLU zero ≈ 49%)
-- [ ] **5.** Cross-Entropy loss ← **ĐANG Ở ĐÂY** (đặc tả đã đưa, người dùng chưa code)
-- [ ] 6. Backpropagation (Dense, ReLU, SoftmaxCE: `dZ = (P - Y) / B`) + gradient check số học
-- [ ] 7. Optimizer: SGD → Momentum → Adam
-- [ ] 8. Training loop + mini-batch (dự đoán: overfit mạnh, 524k tham số / 1440 ảnh)
-- [ ] 9. Đánh giá: accuracy, confusion matrix (dự đoán nhầm crazing ↔ rolled-in_scale)
+- [x] **5.** Cross-Entropy (`log_softmax`, `cross_entropy`, `SoftmaxCrossEntropy`, `accuracy`) — loss ban đầu ≈ 2.0–2.6 quanh ln6
+- [x] **6.** Backpropagation + `src/gradcheck.py` (sai số ~1e-9, overfit 64 ảnh: loss 2.67 → 0.002, acc 1.0)
+- [x] **7.** Optimizer: `SGD`, `Momentum`, `Adam` (thung lũng k=100: SGD 260 bước, Momentum 95, Adam 86)
+- [x] **8.** Training loop (`src/model.py`, `src/train.py`) — MLP [128] + Adam 1e-3, 30 epoch: train acc **0.90** / val acc **0.48** (tốt nhất 0.53 ở epoch 14), chênh lệch **+0.42** → overfit đúng như dự đoán. SGD lr=0.1 NỔ ở epoch 11 trên toàn tập (dù học thuộc 64 ảnh rất tốt ở Bước 7)
+- [ ] **9.** Đánh giá: accuracy, confusion matrix ← **ĐANG Ở ĐÂY** (dự đoán nhầm crazing ↔ rolled-in_scale)
 - [ ] 10. Chống overfit: L2, Dropout, BatchNorm
 - [ ] 11. CNN bằng NumPy (im2col)
 - [ ] 12. Lưu/nạp model, dự đoán ảnh mới
