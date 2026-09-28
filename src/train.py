@@ -46,9 +46,43 @@ def danh_gia(model: Sequential, criterion: SoftmaxCrossEntropy,
     return tong_loss / n, tong_dung / n
 
 
+def lat_ngau_nhien(Xb: np.ndarray, rng: np.random.Generator, size: int = 64) -> np.ndarray:
+    """
+    Tăng cường dữ liệu: lật ngang và/hoặc dọc từng ảnh một cách ngẫu nhiên.
+
+    Parameters:
+        Xb: (B, size*size) đã duỗi phẳng cho MLP, HOẶC (B, C, H, W) cho CNN.
+        rng: Bộ sinh ngẫu nhiên.
+        size: Cạnh ảnh vuông (chỉ dùng khi Xb ở dạng phẳng).
+
+    Returns:
+        Cùng shape và dtype với Xb.
+
+    Ảnh lỗi bề mặt thép KHÔNG có chiều "đúng": một vết xước lật ngược vẫn là vết
+    xước. Vậy mỗi ảnh có 4 biến thể hợp lệ (gốc, lật ngang, lật dọc, lật cả hai)
+    -> nhân dữ liệu lên 4 lần mà không tốn thêm ảnh nào.
+
+    Mỗi ảnh được quyết định ĐỘC LẬP, và quyết định lại ở mỗi epoch, nên mạng gần
+    như không bao giờ thấy đúng cùng một batch hai lần.
+    """
+    B = Xb.shape[0]
+    # Đưa cả hai dạng về (B, C, H, W) để xử lý chung
+    anh = Xb.reshape(B, 1, size, size) if Xb.ndim == 2 else Xb
+
+    ngang = rng.random(B) < 0.5
+    doc = rng.random(B) < 0.5
+    # [..., ::-1] lật theo chiều cuối (rộng); [..., ::-1, :] lật chiều cao
+    anh = np.where(ngang[:, None, None, None], anh[..., ::-1], anh)
+    anh = np.where(doc[:, None, None, None], anh[..., ::-1, :], anh)
+
+    return anh.reshape(Xb.shape).astype(Xb.dtype)
+
+
 def train(model: Sequential, optimizer: Optimizer, criterion: SoftmaxCrossEntropy,
           data: dict, epochs: int = 30, batch_size: int = 64,
-          rng: np.random.Generator | None = None, verbose: bool = True) -> dict:
+          rng: np.random.Generator | None = None, verbose: bool = True,
+          patience: int | None = None, khoi_phuc_tot_nhat: bool = True,
+          augment: bool = False) -> dict:
     """
     Huấn luyện mô hình và trả về lịch sử để vẽ đường cong.
 
@@ -73,8 +107,14 @@ def train(model: Sequential, optimizer: Optimizer, criterion: SoftmaxCrossEntrop
     X_val, Y_val, y_val = data["X_val"], data["Y_val"], data["y_val"]
 
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [],
-               "no_o_epoch": None}
+               "no_o_epoch": None, "epoch_tot_nhat": None, "val_acc_tot_nhat": -1.0,
+               "dung_som_o_epoch": None}
     bat_dau = time.perf_counter()
+
+    # Early stopping: nhớ bộ trọng số tại epoch có val accuracy cao nhất
+    tham_so_tot_nhat: list[np.ndarray] | None = None
+    buffer_tot_nhat: list[np.ndarray] | None = None
+    so_epoch_khong_tien_bo = 0
 
     if verbose:
         print(model)
@@ -87,6 +127,9 @@ def train(model: Sequential, optimizer: Optimizer, criterion: SoftmaxCrossEntrop
 
         # shuffle=True: mỗi epoch một thứ tự khác nhau
         for Xb, Yb in iterate_minibatches(X_train, Y_train, batch_size, shuffle=True, rng=rng):
+            if augment:
+                Xb = lat_ngau_nhien(Xb, rng)    # chỉ tăng cường lúc train
+
             Z = model.forward(Xb, training=True)
             loss = criterion.forward(Z, Yb)
 
@@ -121,10 +164,44 @@ def train(model: Sequential, optimizer: Optimizer, criterion: SoftmaxCrossEntrop
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
 
+        # --- Early stopping: theo dõi và giữ lại bộ trọng số tốt nhất ---
+        pha_ky_luc = val_acc > history["val_acc_tot_nhat"]
+        if pha_ky_luc:
+            history["val_acc_tot_nhat"] = val_acc
+            history["epoch_tot_nhat"] = epoch
+            # .copy() là bắt buộc: params() trả về THAM CHIẾU, các epoch sau sẽ
+            # ghi đè lên chính những mảng này.
+            tham_so_tot_nhat = [p.copy() for p in model.params()]
+            # PHẢI chụp cả buffer: running_mean/var của BatchNorm không phải tham số
+            # học được, nhưng chúng quyết định kết quả lúc đánh giá. Chỉ khôi phục
+            # W mà bỏ quên chúng thì mô hình chạy với trọng số của epoch này và
+            # thống kê chuẩn hóa của epoch khác -> accuracy tụt mà không rõ vì sao.
+            buffer_tot_nhat = [b.copy() for b in model.buffers()]
+            so_epoch_khong_tien_bo = 0
+        else:
+            so_epoch_khong_tien_bo += 1
+
         if verbose:
             print(f"epoch {epoch:3d}/{epochs} | train loss {train_loss:.4f} acc {train_acc:.4f}"
                   f" | val loss {val_loss:.4f} acc {val_acc:.4f}"
-                  f" | {time.perf_counter() - t0:.2f}s")
+                  f" | {time.perf_counter() - t0:.2f}s{'  <- kỷ lục' if pha_ky_luc else ''}")
+
+        if patience is not None and so_epoch_khong_tien_bo >= patience:
+            history["dung_som_o_epoch"] = epoch
+            if verbose:
+                print(f"Dừng sớm: {patience} epoch liên tiếp không cải thiện val accuracy.")
+            break
+
+    # Khôi phục bộ trọng số tốt nhất: ghi TẠI CHỖ để model và optimizer vẫn
+    # trỏ vào đúng những mảng cũ.
+    if khoi_phuc_tot_nhat and tham_so_tot_nhat is not None:
+        for p, p_tot in zip(model.params(), tham_so_tot_nhat):
+            p[...] = p_tot
+        for b, b_tot in zip(model.buffers(), buffer_tot_nhat):
+            b[...] = b_tot
+        if verbose:
+            print(f"Đã khôi phục trọng số của epoch {history['epoch_tot_nhat']} "
+                  f"(val acc {history['val_acc_tot_nhat']:.4f})")
 
     if verbose and history["val_acc"]:
         tot_nhat = int(np.argmax(history["val_acc"]))

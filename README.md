@@ -40,14 +40,43 @@ neu_det/
 ├── src/                    # mã nguồn
 │   ├── data_loader.py      # đọc JPEG -> numpy, cache .npz
 │   ├── preprocess.py       # chuẩn hóa, one-hot, mini-batch, show_samples
-│   ├── layers.py           # Layer, Dense
+│   ├── layers.py           # Layer, Dense, Dropout, BatchNorm1d
 │   ├── activations.py      # ReLU, LeakyReLU, softmax
 │   ├── losses.py           # log_softmax, cross-entropy, accuracy
+│   ├── optimizers.py       # SGD, Momentum, Adam/AdamW
+│   ├── model.py            # Sequential, tao_mlp, tao_cnn
+│   ├── train.py            # vòng lặp huấn luyện, early stopping, augmentation
+│   ├── evaluate.py         # confusion matrix, precision/recall, ảnh đoán sai
+│   ├── regularization.py   # so sánh các kỹ thuật chống overfit
+│   ├── conv.py             # im2col/col2im, Conv2D, MaxPool2D, Flatten
+│   ├── cnn_train.py        # huấn luyện & so sánh các cấu hình CNN
+│   ├── checkpoint.py       # lưu/nạp model, dự đoán ảnh mới
+│   ├── train_final.py      # train mô hình cuối rồi lưu checkpoint
+│   ├── predict.py          # CLI dự đoán một ảnh bất kỳ
 │   └── gradcheck.py        # kiểm tra backprop bằng sai phân số
 ├── CLAUDE.md               # ngữ cảnh + tiến độ cho Claude Code
 ├── requirements.txt
 ├── cache/                  # file .npz sinh ra khi chạy (git bỏ qua)
+├── checkpoints/            # mô hình đã train (git bỏ qua)
+├── outputs/                # hình vẽ (git bỏ qua)
 └── neu_det_env/            # môi trường ảo (git bỏ qua)
+```
+
+## Kết quả
+
+| mô hình | tham số | val accuracy | val loss |
+|---|---|---|---|
+| MLP [128], không chống overfit (Bước 8) | 525,190 | 0.547 | 1.631 |
+| MLP [256,128] + BN + Dropout + L2 + lật (Bước 10) | 1,083,270 | 0.611 | 0.876 |
+| **CNN (16,32) + lật + BN (Bước 11)** | **529,670** | **0.942** | **0.179** |
+
+Lớp `rolled-in_scale` có recall **0.000** với mọi cấu hình MLP, và **1.000** với CNN.
+
+## Dự đoán một ảnh
+
+```powershell
+python -u src\train_final.py          # train rồi lưu checkpoints\cnn_neu_det.npz
+python src\predict.py datasets\NEU-DET\validation\images\scratches\scratches_300.jpg
 ```
 
 ## Môi trường
@@ -83,7 +112,7 @@ Tiếp tục học với Claude Code: mở thư mục trong VS Code. Claude Code
 - [x] **6.** Backpropagation
 - [x] **7.** Optimizer: SGD → Momentum → Adam
 - [x] **8.** Training loop + mini-batch
-- [ ] **9.** Đánh giá: accuracy, confusion matrix
-- [ ] **10.** Chống overfit: L2, Dropout, BatchNorm
-- [ ] **11.** CNN bằng NumPy (im2col)
-- [ ] **12.** Lưu/nạp model, dự đoán ảnh mới
+- [x] **9.** Đánh giá: accuracy, confusion matrix
+- [x] **10.** Chống overfit: L2, Dropout, BatchNorm
+- [x] **11.** CNN bằng NumPy (im2col)
+- [x] **12.** Lưu/nạp model, dự đoán ảnh mới

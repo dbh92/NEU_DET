@@ -42,6 +42,29 @@ class Layer:
         """
         return {}
 
+    def cau_hinh(self) -> dict:
+        """
+        Mô tả đủ để DỰNG LẠI lớp này: {"loai": ..., và các tham số của __init__}.
+
+        Dùng khi lưu/nạp mô hình. Giá trị phải lấy từ chính thuộc tính của object
+        (ví dụ self.W.shape[0]) chứ đừng lưu thêm biến riêng lúc __init__ — hai
+        nguồn sự thật sẽ lệch nhau ngay khi bạn sửa code.
+
+        Lớp không có tham số cấu trúc (ReLU, Flatten) chỉ cần mặc định này.
+        """
+        return {"loai": type(self).__name__}
+
+    def buffers(self) -> dict[str, np.ndarray]:
+        """
+        Trạng thái KHÔNG học được bằng gradient nhưng VẪN là một phần của mô hình,
+        ví dụ running_mean / running_var của BatchNorm.
+
+        Optimizer không đụng tới chúng, nhưng khi lưu/nạp mô hình hoặc khi khôi
+        phục bộ trọng số tốt nhất (early stopping) thì PHẢI mang theo. Quên là
+        mô hình khôi phục sẽ dùng trọng số của epoch này với thống kê của epoch khác.
+        """
+        return {}
+
 
 # Lớp kết nối đầy đủ (DENSE / LINEAR)
 class Dense(Layer):
@@ -133,10 +156,171 @@ class Dense(Layer):
     def grads(self) -> dict[str, np.ndarray]:
         return {"W": self.dW, "b": self.db}
 
+    def cau_hinh(self) -> dict:
+        return {"loai": "Dense",
+                "in_features": int(self.W.shape[0]),
+                "out_features": int(self.W.shape[1])}
+
     # Method này giúp dễ đọc object
     def __repr__(self) -> str:
         num_params = self.W.size + self.b.size
         return f"Dense({self.W.shape[0]} -> {self.W.shape[1]}, params={num_params:,})"
+
+
+class Dropout(Layer):
+    """
+    Mỗi bước train tắt ngẫu nhiên một phần nơ-ron, buộc mạng không được phụ
+    thuộc vào bất kỳ nơ-ron riêng lẻ nào. Khi ĐÁNH GIÁ thì không tắt ai cả.
+
+    Dùng "inverted dropout": CHIA cho (1 - p) ngay lúc train, nên kỳ vọng đầu ra
+    giữ nguyên và lúc đánh giá không phải làm gì.
+
+    Cách cũ (nhân (1-p) lúc đánh giá) bắt mọi nơi dùng mô hình phải nhớ con số p
+    và nhớ nhân lại — chỉ cần một chỗ quên là kết quả sai mà không báo lỗi.
+    """
+
+    def __init__(self, p: float = 0.5, rng: np.random.Generator | None = None,
+                 seed: int | None = None):
+        """
+        Parameters:
+            p: Xác suất TẮT mỗi nơ-ron. p = 0 nghĩa là không làm gì.
+            rng: Bộ sinh ngẫu nhiên dùng để tạo mask.
+            seed: Nếu khác None, mỗi lần forward sẽ tạo lại rng từ seed này, nên
+                mask GIỐNG HỆT nhau giữa các lần gọi. Chỉ dùng cho gradcheck:
+                sai phân số cần f(x+h) và f(x-h) chạy trên cùng một mask.
+        """
+        if not 0.0 <= p < 1.0:
+            raise ValueError(f"p phải nằm trong [0, 1), nhận {p}")
+        self.p = p
+        self.seed = seed
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.mask = None
+
+    def forward(self, X: np.ndarray, training: bool = True) -> np.ndarray:
+        if not training or self.p == 0.0:
+            self.mask = None
+            return X                        # đánh giá: KHÔNG làm gì cả
+
+        rng = np.random.default_rng(self.seed) if self.seed is not None else self.rng
+        # mask là float (0 hoặc 1/(1-p)), không phải bool: đã gộp luôn phép chia
+        self.mask = (rng.random(X.shape) >= self.p).astype(X.dtype) / (1.0 - self.p)
+        return X * self.mask
+
+    def backward(self, dout: np.ndarray) -> np.ndarray:
+        if self.mask is None:
+            return dout                     # forward chạy ở chế độ đánh giá
+        return dout * self.mask
+
+    def cau_hinh(self) -> dict:
+        # seed và rng KHÔNG lưu: chúng chỉ ảnh hưởng lúc train, còn lúc dự đoán
+        # Dropout là ánh xạ đồng nhất.
+        return {"loai": "Dropout", "p": float(self.p)}
+
+    def __repr__(self) -> str:
+        return f"Dropout(p={self.p})"
+
+
+class BatchNorm1d(Layer):
+    """
+    Chuẩn hóa đầu ra của lớp trước về mean 0, std 1 theo TỪNG FEATURE (axis=0),
+    rồi cho mạng tự học lại thang đo qua gamma và beta.
+
+        xhat = (x - mu) / sqrt(var + eps)
+        out  = gamma * xhat + beta
+
+    Lợi ích: train ổn định hơn, cho phép learning rate lớn hơn, và có hiệu ứng
+    chống overfit nhẹ (mỗi mẫu được chuẩn hóa bằng thống kê của cả batch, nên
+    đầu ra của nó phụ thuộc vào các mẫu đi cùng -> một dạng nhiễu có ích).
+
+    Khi ĐÁNH GIÁ thì dùng running_mean/running_var tích luỹ được lúc train, chứ
+    không dùng thống kê của batch hiện tại.
+    """
+
+    def __init__(self, num_features: int, momentum: float = 0.9,
+                 eps: float = 1e-5, dtype=np.float32):
+        """
+        Parameters:
+            num_features: Số chiều D của đầu vào (B, D).
+            momentum: Hệ số giữ lại của thống kê chạy (0.9 = giữ 90% giá trị cũ).
+            eps: Chống chia cho 0 khi một feature có phương sai bằng 0.
+        """
+        # Tham số học được. gamma = 1 và beta = 0 -> lúc đầu BatchNorm chỉ thuần
+        # chuẩn hóa, chưa bóp méo gì; mạng tự học lại thang đo nếu thấy cần.
+        self.gamma = np.ones(num_features, dtype=dtype)
+        self.beta = np.zeros(num_features, dtype=dtype)
+        self.dgamma = np.zeros_like(self.gamma)
+        self.dbeta = np.zeros_like(self.beta)
+
+        # Trạng thái KHÔNG học được, chỉ tích luỹ bằng trung bình trượt
+        self.running_mean = np.zeros(num_features, dtype=dtype)
+        self.running_var = np.ones(num_features, dtype=dtype)
+
+        self.momentum = momentum
+        self.eps = eps
+        self.xhat = None
+        self.istd = None
+
+    def forward(self, X: np.ndarray, training: bool = True) -> np.ndarray:
+        if X.ndim != 2 or X.shape[1] != self.gamma.shape[0]:
+            raise ValueError(f"BatchNorm1d mong đợi (batch, {self.gamma.shape[0]}), nhận {X.shape}")
+
+        if training:
+            mu = X.mean(axis=0)             # (D,) trung bình theo TỪNG FEATURE
+            var = X.var(axis=0)             # (D,) không phải theo từng mẫu
+
+            self.istd = 1.0 / np.sqrt(var + self.eps)
+            self.xhat = (X - mu) * self.istd
+
+            # Tích luỹ thống kê để dùng lúc đánh giá (ghi tại chỗ)
+            self.running_mean[...] = self.momentum * self.running_mean + (1 - self.momentum) * mu
+            self.running_var[...] = self.momentum * self.running_var + (1 - self.momentum) * var
+        else:
+            self.xhat = (X - self.running_mean) / np.sqrt(self.running_var + self.eps)
+            self.istd = None
+
+        return self.gamma * self.xhat + self.beta
+
+    def backward(self, dout: np.ndarray) -> np.ndarray:
+        """
+        Công thức đã rút gọn. Đừng tin nó — để gradcheck xác nhận.
+
+        Điểm tinh tế: mu và var đều phụ thuộc vào MỌI mẫu trong batch, nên đổi
+        một mẫu sẽ kéo theo đầu ra của tất cả các mẫu khác. Hai số hạng trừ đi
+        trong công thức chính là phần đóng góp gián tiếp qua mu và qua var.
+        """
+        if self.xhat is None:
+            raise RuntimeError("Phải gọi forward() trước khi gọi backward()")
+        if self.istd is None:
+            raise RuntimeError("forward() đã chạy ở chế độ đánh giá, không backward được")
+
+        B = dout.shape[0]
+        self.dgamma[...] = (dout * self.xhat).sum(axis=0)
+        self.dbeta[...] = dout.sum(axis=0)
+
+        dxhat = dout * self.gamma
+        return (self.istd / B) * (B * dxhat
+                                  - dxhat.sum(axis=0)
+                                  - self.xhat * (dxhat * self.xhat).sum(axis=0))
+
+    def params(self) -> dict[str, np.ndarray]:
+        # Khoá KHÔNG phải "W" nên optimizer sẽ không áp weight decay lên chúng
+        return {"gamma": self.gamma, "beta": self.beta}
+
+    def grads(self) -> dict[str, np.ndarray]:
+        return {"gamma": self.dgamma, "beta": self.dbeta}
+
+    def buffers(self) -> dict[str, np.ndarray]:
+        # Không học bằng gradient, nhưng quyết định kết quả lúc đánh giá
+        return {"running_mean": self.running_mean, "running_var": self.running_var}
+
+    def cau_hinh(self) -> dict:
+        return {"loai": "BatchNorm1d",
+                "num_features": int(self.gamma.shape[0]),
+                "momentum": float(self.momentum),
+                "eps": float(self.eps)}
+
+    def __repr__(self) -> str:
+        return f"BatchNorm1d({self.gamma.shape[0]})"
 
 
 if __name__ == "__main__":

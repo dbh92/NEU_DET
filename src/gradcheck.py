@@ -63,15 +63,23 @@ def numerical_gradient(f, x: np.ndarray, h: float = 1e-4) -> np.ndarray:
     return grad
 
 
-def rel_error(a: np.ndarray, b: np.ndarray) -> float:
+def rel_error(a: np.ndarray, b: np.ndarray, san: float = 1e-8) -> float:
     """
-    Sai số tương đối lớn nhất giữa hai mảng: max |a-b| / (|a| + |b|).
+    Sai số tương đối lớn nhất giữa hai mảng: max |a-b| / max(|a| + |b|, san).
 
     Dùng sai số TƯƠNG ĐỐI chứ không phải tuyệt đối, vì gradient có thể rất nhỏ
     (1e-8) hoặc rất lớn (1e3) — sai lệch 1e-6 là thảm họa với cái đầu nhưng
     không đáng kể với cái sau.
+
+    Tham số `san` là sàn của mẫu số. Cần nó vì có những gradient ĐÚNG BẰNG 0 về
+    mặt toán học, và giá trị tính ra chỉ là nhiễu làm tròn cỡ 1e-17. Chia hai số
+    rác cho nhau sẽ ra một tỉ lệ vô nghĩa (thậm chí bằng 1.0) và báo SAI oan.
+    Ví dụ thật: bias của lớp Dense đứng NGAY TRƯỚC BatchNorm có gradient bằng 0,
+    vì BatchNorm trừ đi trung bình nên cộng thêm hằng số b vào mọi hàng không
+    làm đầu ra đổi chút nào. (Đó cũng là lý do các thư viện đặt bias=False cho
+    lớp đứng trước BatchNorm — b đó hoàn toàn vô dụng.)
     """
-    return float(np.max(np.abs(a - b) / np.maximum(1e-12, np.abs(a) + np.abs(b))))
+    return float(np.max(np.abs(a - b) / np.maximum(san, np.abs(a) + np.abs(b))))
 
 
 def check_gradients(seed: int = 0, nguong: float = 1e-6) -> None:
@@ -143,6 +151,96 @@ def check_gradients(seed: int = 0, nguong: float = 1e-6) -> None:
     print("\nTẤT CẢ GRADIENT ĐỀU ĐÚNG ✔")
 
 
+def check_gradients_mang(layers: list, X: np.ndarray, Y: np.ndarray,
+                         nguong: float = 1e-6, verbose: bool = True) -> None:
+    """
+    Kiểm tra gradient cho MỘT MẠNG BẤT KỲ (danh sách lớp), kể cả BatchNorm, Dropout.
+
+    Parameters:
+        layers: Danh sách lớp, chạy nối tiếp. Nên dùng dtype float64.
+        X: (B, D) đầu vào, float64.
+        Y: (B, C) nhãn one-hot, float64.
+        nguong: Ngưỡng sai số tương đối tối đa.
+
+    Dropout phải được tạo với seed cố định, nếu không mỗi lần f() chạy lại sẽ
+    sinh mask khác nhau và sai phân số trở nên vô nghĩa.
+
+    BatchNorm cũng có điểm tinh tế: mỗi lần forward(training=True) lại cập nhật
+    running_mean/running_var. Điều đó KHÔNG ảnh hưởng tới gradient (loss lúc train
+    chỉ dùng thống kê của batch hiện tại), nên vẫn kiểm tra được bình thường.
+    """
+    criterion = SoftmaxCrossEntropy()
+
+    def f() -> float:
+        A = X
+        for layer in layers:
+            A = layer.forward(A, training=True)
+        return criterion.forward(A, Y)
+
+    # --- Gradient giải tích ------------------------------------------------
+    loss = f()
+    dout = criterion.backward()
+    for layer in reversed(layers):
+        dout = layer.backward(dout)
+    dX = dout
+
+    # PHẢI copy trước khi gọi numerical_gradient: nó chạy lại f() nhiều lần và
+    # mỗi lần forward sẽ ghi đè cache lẫn gradient của các lớp.
+    giai_tich, tham_so = {}, {}
+    for i, layer in enumerate(layers):
+        p, g = layer.params(), layer.grads()
+        for ten in p:
+            khoa = f"d{ten}{i}"                 # ví dụ dW0, db0, dgamma1, dbeta1
+            giai_tich[khoa] = g[ten].copy()
+            tham_so[khoa] = p[ten]
+    giai_tich["dX"] = dX.copy()
+    tham_so["dX"] = X
+
+    if verbose:
+        chuoi = " -> ".join(repr(l) for l in layers)
+        print(f"Mạng: {chuoi}")
+        print(f"batch = {X.shape[0]}, dtype = {X.dtype}, loss = {loss:.6f}\n")
+        print(f"{'tham số':<10}{'shape':<12}{'sai số tương đối':<20}kết quả")
+        print("-" * 58)
+
+    for ten, g_analytic in giai_tich.items():
+        g_numeric = numerical_gradient(f, tham_so[ten])
+        sai_so = rel_error(g_analytic, g_numeric)
+        dat = sai_so < nguong
+        if verbose:
+            print(f"{ten:<10}{str(g_analytic.shape):<12}{sai_so:<20.3e}{'ĐẠT' if dat else 'SAI'}")
+        assert dat, (
+            f"{ten}: sai số {sai_so:.3e} >= {nguong:.0e}. Xem lại công thức backward.\n"
+            f"giải tích:\n{g_analytic}\nsố:\n{g_numeric}"
+        )
+
+    if verbose:
+        print("\nTẤT CẢ GRADIENT ĐỀU ĐÚNG ✔")
+
+
+def check_gradients_chong_overfit(seed: int = 0, nguong: float = 1e-6) -> None:
+    """
+    Gradcheck cho mạng có BatchNorm và Dropout:
+        Dense(5,4) -> BatchNorm1d(4) -> ReLU -> Dropout(0.3, seed cố định) -> Dense(4,3)
+    """
+    from layers import BatchNorm1d, Dropout
+
+    rng = np.random.default_rng(seed)
+    B, D, H, C = 7, 5, 4, 3
+
+    X = rng.standard_normal((B, D))
+    Y = np.eye(C)[rng.integers(0, C, B)]
+
+    layers = [
+        Dense(D, H, init="he", rng=rng, dtype=np.float64),
+        BatchNorm1d(H, dtype=np.float64),
+        ReLU(),
+        Dropout(0.3, seed=123),          # seed cố định -> mask giống nhau mọi lần gọi
+        Dense(H, C, init="xavier", rng=rng, dtype=np.float64),
+    ]
+    check_gradients_mang(layers, X, Y, nguong=nguong)
+
+
 def overfit_batch_nho(n_anh: int = 64, so_vong: int = 300, lr: float = 0.1,
                       seed: int = 42) -> None:
     """
@@ -206,6 +304,11 @@ if __name__ == "__main__":
     print("PHẦN 1: KIỂM TRA GRADIENT BẰNG SAI PHÂN SỐ")
     print("=" * 56)
     check_gradients()
+
+    print("\n" + "=" * 56)
+    print("PHẦN 1b: GRADCHECK CHO BATCHNORM VÀ DROPOUT")
+    print("=" * 56)
+    check_gradients_chong_overfit()
 
     print("\n" + "=" * 56)
     print("PHẦN 2: HỌC THUỘC MỘT BATCH NHỎ (dữ liệu NEU-DET thật)")

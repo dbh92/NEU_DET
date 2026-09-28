@@ -6,16 +6,20 @@ class Optimizer:
     Lớp cơ sở: gom tham chiếu tới toàn bộ tham số và gradient của mạng.
     """
 
-    def __init__(self, layers: list[Layer], lr: float = 0.01):
+    def __init__(self, layers: list[Layer], lr: float = 0.01,
+                 weight_decay: float = 0.0):
         """
         Parameters:
             layers: Danh sách các lớp của mạng. Lớp không có tham số (ReLU, Dropout ...) trả về {} nên tự động bị bỏ qua
             lr: Learning rate.
-            )
+            weight_decay: Hệ số L2. Chỉ áp lên trọng số "W", KHÔNG áp lên bias
+                hay gamma/beta của BatchNorm — xem self.la_trong_so.
         """
         self.lr = lr
+        self.weight_decay = weight_decay
         self.params: list[np.ndarray] = []       # [W1, b1, W2, b2, ...]
         self.grads: list[np.ndarray] = []        # [dW1, db1, dW2, db2, ...] CÙNG THỨ TỰ
+        self.la_trong_so: list[bool] = []        # True nếu tham số đó là "W"
 
         # Duyệt MỘT LẦN ở đây, không gọi lại params() trong step(), để thứ tự
         # của hai danh sách luôn khớp nhau: params[i] luôn ứng với grads[i].
@@ -31,6 +35,9 @@ class Optimizer:
                     )
                 self.params.append(p[ten])
                 self.grads.append(g[ten])
+                # Chỉ W mới bị phạt L2: b chỉ dịch ngưỡng kích hoạt, không nhân
+                # với dữ liệu nên không gây overfit; gamma/beta của BatchNorm cũng vậy.
+                self.la_trong_so.append(ten == "W")
 
         if not self.params:
             raise ValueError("Không tìm thấy tham số nào — mạng chỉ gồm các lớp không có tham số?")
@@ -40,6 +47,24 @@ class Optimizer:
     def step(self) -> None:
         """Cập nhật toàn bộ tham số bằng gradient hiện tại."""
         raise NotImplementedError("Lớp con phải tự cài đặt step()")
+
+    def grad_hieu_dung(self, i: int) -> np.ndarray:
+        """
+        Gradient của tham số thứ i, đã cộng số hạng phạt L2.
+
+        L_tổng = L_CE + (lambda/2) * sum(W^2)  =>  dL/dW = dL_CE/dW + lambda*W
+        """
+        if self.weight_decay > 0.0 and self.la_trong_so[i]:
+            return self.grads[i] + self.weight_decay * self.params[i]
+        return self.grads[i]
+
+    def l2_loss(self) -> float:
+        """Giá trị số hạng phạt (lambda/2) * sum(W^2), để cộng vào loss khi in ra."""
+        if self.weight_decay == 0.0:
+            return 0.0
+        tong = sum(float((p ** 2).sum())
+                   for p, la_w in zip(self.params, self.la_trong_so) if la_w)
+        return 0.5 * self.weight_decay * tong
 
     def zero_grad(self) -> None:
         """
@@ -70,11 +95,11 @@ class SGD (Optimizer):
     """
 
     def step(self):
-        for p, g in zip(self.params, self.grads):
+        for i, p in enumerate(self.params):
             # p -= ... là GHI TẠI CHỖ (__isub__) nên layer.W thật sự đổi.
             # Viết p = p - lr*g thì chỉ gán lại biến local p, layer.W KHÔNG đổi
             # -> mạng chạy bình thường, loss đứng yên, và không có lỗi nào được báo.
-            p -= self.lr * g
+            p -= self.lr * self.grad_hieu_dung(i)
 
 
 class Momentum(Optimizer):
@@ -98,9 +123,9 @@ class Momentum(Optimizer):
         self.velocities = [np.zeros_like(p) for p in self.params]
 
     def step(self) -> None:
-        for p, g, v in zip(self.params, self.grads, self.velocities):
-            v *= self.momentum          # giữ lại quán tính cũ
-            v -= self.lr * g            # cộng thêm lực đẩy mới
+        for i, (p, v) in enumerate(zip(self.params, self.velocities)):
+            v *= self.momentum                          # giữ lại quán tính cũ
+            v -= self.lr * self.grad_hieu_dung(i)       # cộng thêm lực đẩy mới
             p += v
 
     def __repr__(self) -> str:
@@ -130,13 +155,23 @@ class Adam(Optimizer):
                  beta1: float = 0.9, 
                  beta2: float = 0.999,
                  eps: float = 1e-8, 
-                 bias_correction: bool = True):
+                 bias_correction: bool = True,
+                 weight_decay: float = 0.0,
+                 decoupled: bool = True):
         """
         Parameters:
             bias_correction: Đặt False để THẤY tác hại của việc quên hiệu chỉnh
                 chệch (chỉ dùng để so sánh trong test, đừng dùng khi train thật).
+            weight_decay: Hệ số L2, chỉ áp lên "W".
+            decoupled: True = AdamW. Trừ thẳng lr*wd*p SAU bước Adam, thay vì
+                cộng lambda*W vào gradient rồi để nó bị chia cho sqrt(v_hat).
+                Cách cộng vào gradient (decoupled=False) làm mức phạt bị bóp méo:
+                trọng số nào có gradient lớn thì v_hat lớn, nên bị phạt NHẸ đi —
+                trong khi lẽ ra mọi trọng số phải bị co về 0 với cùng một tỉ lệ.
         """
-        super().__init__(layers, lr)
+        super().__init__(layers, lr, weight_decay=0.0 if decoupled else weight_decay)
+        self.decoupled = decoupled
+        self.wd_tach_roi = weight_decay if decoupled else 0.0
         if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
             raise ValueError(f"beta phải nằm trong [0, 1), nhận beta1={beta1}, beta2={beta2}")
         self.beta1, self.beta2, self.eps = beta1, beta2, eps
@@ -156,7 +191,9 @@ class Adam(Optimizer):
         else:
             hc1 = hc2 = 1.0
 
-        for p, g, m, v in zip(self.params, self.grads, self.m, self.v):
+        for i, (p, m, v) in enumerate(zip(self.params, self.m, self.v)):
+            g = self.grad_hieu_dung(i)      # đã cộng L2 nếu decoupled=False
+
             # m += (1-b1)*(g - m)  tương đương  m = b1*m + (1-b1)*g, nhưng ghi tại chỗ
             m += (1.0 - self.beta1) * (g - m)
             v += (1.0 - self.beta2) * (g * g - v)
@@ -166,9 +203,26 @@ class Adam(Optimizer):
 
             p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
 
+            # AdamW: co trọng số về 0 bằng một bước riêng, không đi qua sqrt(v_hat)
+            if self.wd_tach_roi > 0.0 and self.la_trong_so[i]:
+                p -= self.lr * self.wd_tach_roi * p
+
+    def l2_loss(self) -> float:
+        """Với AdamW không có số hạng L2 trong loss, nhưng vẫn báo cáo để so sánh."""
+        wd = self.wd_tach_roi if self.decoupled else self.weight_decay
+        if wd == 0.0:
+            return 0.0
+        tong = sum(float((p ** 2).sum())
+                   for p, la_w in zip(self.params, self.la_trong_so) if la_w)
+        return 0.5 * wd * tong
+
     def __repr__(self) -> str:
         ten = "Adam" if self.bias_correction else "Adam(KHÔNG hiệu chỉnh chệch)"
-        return f"{ten}(lr={self.lr}, beta1={self.beta1}, beta2={self.beta2})"  
+        if self.decoupled and self.wd_tach_roi > 0:
+            ten = "AdamW"
+        wd = self.wd_tach_roi if self.decoupled else self.weight_decay
+        them = f", weight_decay={wd}" if wd else ""
+        return f"{ten}(lr={self.lr}, beta1={self.beta1}, beta2={self.beta2}{them})"
 
 
 def test_optimizers(seed: int = 42) -> None:

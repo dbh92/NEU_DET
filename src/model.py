@@ -15,7 +15,7 @@ Lưu ý: SoftmaxCrossEntropy KHÔNG nằm trong Sequential, vì nó nhận 2 đ�
 import numpy as np
 
 from activations import ReLU
-from layers import Dense, Layer
+from layers import BatchNorm1d, Dense, Dropout, Layer
 
 
 class Sequential:
@@ -67,6 +67,14 @@ class Sequential:
         """Danh sách tham chiếu tới mọi tham số học được."""
         return [p for layer in self.layers for p in layer.params().values()]
 
+    def buffers(self) -> list[np.ndarray]:
+        """
+        Danh sách tham chiếu tới trạng thái không học được (running_mean/var của
+        BatchNorm). Phải lưu/khôi phục CÙNG với params, nếu không mô hình sẽ dùng
+        trọng số của epoch này với thống kê chuẩn hóa của epoch khác.
+        """
+        return [b for layer in self.layers for b in layer.buffers().values()]
+
     def so_tham_so(self) -> int:
         """Tổng số tham số học được của cả mạng."""
         return sum(p.size for p in self.params())
@@ -80,9 +88,10 @@ class Sequential:
 
 
 def tao_mlp(in_features: int, hidden: list[int], num_classes: int,
-            rng: np.random.Generator | None = None) -> Sequential:
+            rng: np.random.Generator | None = None,
+            dropout: float = 0.0, batchnorm: bool = False) -> Sequential:
     """
-    Dựng một MLP: Dense -> ReLU -> Dense -> ReLU -> ... -> Dense.
+    Dựng một MLP: Dense [-> BatchNorm] -> ReLU [-> Dropout] -> ... -> Dense.
 
     Parameters:
         in_features: Số chiều đầu vào (4096 với ảnh 64x64).
@@ -91,12 +100,19 @@ def tao_mlp(in_features: int, hidden: list[int], num_classes: int,
             dùng làm mốc so sánh xem lớp ẩn có đáng giá không.
         num_classes: Số lớp đầu ra (6).
         rng: Bộ sinh số ngẫu nhiên, để dựng lại đúng cùng bộ trọng số.
+        dropout: Xác suất tắt nơ-ron sau mỗi ReLU. 0 = không dùng.
+        batchnorm: Chèn BatchNorm1d giữa Dense và ReLU.
 
     Returns:
         Sequential đã sẵn sàng dùng.
 
     Các lớp ẩn dùng khởi tạo "he" vì phía sau có ReLU cắt mất một nửa tín hiệu.
     Lớp cuối dùng "xavier" vì phía sau nó chỉ còn softmax, không có ReLU.
+
+    Thứ tự Dense -> BatchNorm -> ReLU -> Dropout là quy ước phổ biến nhất:
+    chuẩn hóa TRƯỚC khi cắt phần âm, và tắt nơ-ron SAU khi đã kích hoạt.
+    KHÔNG đặt BatchNorm hay Dropout sau lớp Dense cuối: đầu ra đó là logits,
+    phải đi thẳng vào softmax.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -105,9 +121,63 @@ def tao_mlp(in_features: int, hidden: list[int], num_classes: int,
     truoc = in_features
     for h in hidden:
         layers.append(Dense(truoc, h, init="he", rng=rng))
+        if batchnorm:
+            layers.append(BatchNorm1d(h))
         layers.append(ReLU())
+        if dropout > 0:
+            layers.append(Dropout(dropout, rng=rng))
         truoc = h
     layers.append(Dense(truoc, num_classes, init="xavier", rng=rng))
+
+    return Sequential(layers)
+
+
+def tao_cnn(in_channels: int = 1, img_size: int = 64, num_classes: int = 6,
+            kenh: list[int] = (8, 16), hidden: int = 64,
+            rng: np.random.Generator | None = None,
+            dropout: float = 0.5, batchnorm: bool = False) -> Sequential:
+    """
+    Dựng CNN: [Conv -> ReLU -> MaxPool] xN -> Flatten -> Dense -> ReLU -> Dropout -> Dense.
+
+    Parameters:
+        in_channels: Số kênh ảnh vào (1 với ảnh xám).
+        img_size: Cạnh ảnh vuông (64).
+        num_classes: Số lớp đầu ra.
+        kenh: Số bộ lọc của từng khối conv, ví dụ (8, 16).
+        hidden: Số nơ-ron của lớp Dense ẩn sau Flatten.
+        dropout: Xác suất tắt nơ-ron ở lớp Dense ẩn.
+        batchnorm: Chèn BatchNorm1d sau lớp Dense ẩn.
+
+    Returns:
+        Sequential nhận đầu vào (N, in_channels, img_size, img_size).
+
+    Mỗi MaxPool(2) chia đôi cạnh ảnh, nên sau len(kenh) khối thì cạnh còn
+    img_size // 2**len(kenh). padding = 1 với cửa sổ 3x3 giữ nguyên kích thước
+    trước khi pool ("same"), nên phép tính kích thước rất dễ theo dõi.
+    """
+    from conv import Conv2D, Flatten, MaxPool2D
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    layers: list[Layer] = []
+    truoc = in_channels
+    canh = img_size
+    for c in kenh:
+        layers.append(Conv2D(truoc, c, 3, stride=1, padding=1, rng=rng))
+        layers.append(ReLU())
+        layers.append(MaxPool2D(2))
+        truoc = c
+        canh //= 2
+
+    layers.append(Flatten())
+    layers.append(Dense(truoc * canh * canh, hidden, init="he", rng=rng))
+    if batchnorm:
+        layers.append(BatchNorm1d(hidden))
+    layers.append(ReLU())
+    if dropout > 0:
+        layers.append(Dropout(dropout, rng=rng))
+    layers.append(Dense(hidden, num_classes, init="xavier", rng=rng))
 
     return Sequential(layers)
 
